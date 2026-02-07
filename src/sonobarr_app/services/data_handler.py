@@ -30,6 +30,8 @@ from .integrations.listenbrainz_user import (
     ListenBrainzUserService,
 )
 
+from sonobarr_app.services.musicbrainz_search import search_artist
+
 LIDARR_MONITOR_TYPES = {
     "all",
     "future",
@@ -653,6 +655,101 @@ class DataHandler:
             missing_title="Missing artist data",
             missing_message="Some AI picks couldn't be fully loaded.",
             source_log_label="AI",
+        )
+        if not success:
+            return
+
+    def simple_search(self, sid: str, query: str) -> None:
+        session = self.ensure_session(sid)
+        if query == "" or query is None:
+            self.socketio.emit(
+                "simple_search_error",
+                {
+                    "message": "No Query provided.",
+                },
+                room=sid,
+            )
+            return
+
+        with self.cache_lock:
+            library_artists = list(self.cached_lidarr_names)
+            cleaned_library_names = set(self.cached_cleaned_lidarr_names)
+
+        start_time = time.perf_counter()
+        self.logger.info("Search for %s", query)
+        artists = search_artist(query)
+        elapsed = time.perf_counter() - start_time
+        self.logger.info("Search query succeeded in %.2fs with %d seed artists", elapsed, len(artists))
+
+        if not artists:
+            self.logger.info("Search completed in %.2fs but returned no artists", elapsed)
+            self.socketio.emit(
+                "simple_search_error",
+                {
+                    "message": "MusicBrainz couldn't suggest any artists from that request. Try adding genre or artist hints.",
+                },
+                room=sid,
+            )
+            return
+
+        filtered_seeds: List[str] = []
+        skipped_existing: List[str] = []
+        for artist in artists:
+            name = artist.get_name()
+            normalized_seed = unidecode(name).lower()
+            if normalized_seed in cleaned_library_names:
+                skipped_existing.append(name)
+                continue
+            filtered_seeds.append(name)
+
+        if not filtered_seeds:
+            elapsed = time.perf_counter() - start_time
+            self.logger.info(
+                "MusicBrainz Search completed in %.2fs but every seed matched an existing Lidarr artist", elapsed
+            )
+            self.socketio.emit(
+                "simple_search_error",
+                {
+                    "message": "All suggested artists are already in your Lidarr library. Try a different Query.",
+                },
+                room=sid,
+            )
+            return
+
+        if skipped_existing:
+            self.logger.info(
+                "Filtered %d searched Artists already present in Lidarr: %s",
+                len(skipped_existing),
+                ", ".join(skipped_existing),
+            )
+            toast_message = (
+                f"{len(skipped_existing)} MusicBrainz suggestion(s) are already in your Lidarr library."
+                if len(skipped_existing) > 1
+                else f"{skipped_existing[0]} is already in your Lidarr library."
+            )
+            self.socketio.emit(
+                "new_toast_msg",
+                {
+                    "title": "Skipping known artists",
+                    "message": toast_message,
+                },
+                room=sid,
+            )
+
+        seeds = filtered_seeds
+
+        session.prepare_for_search()
+        success = self._stream_seed_artists(
+            session,
+            sid,
+            seeds,
+            ack_event="simple_search_ack",
+            ack_payload={"seeds": seeds},
+            error_event="simple_search_error",
+            error_message="We couldn't load those artists from our data sources. Try refining your request.",
+            missing_title="Missing artist data",
+            missing_message="Some MusicBrainz picks couldn't be fully loaded.",
+            source_log_label="MusicBrainz",
         )
         if not success:
             return

@@ -1354,6 +1354,43 @@ socket.on('ai_prompt_error', function (payload) {
 	show_toast('AI Assistant', message);
 });
 
+socket.on('simple_search_ack', function (payload) {
+	set_simple_search_loading(false);
+	if (payload && Array.isArray(payload.seeds) && payload.seeds.length > 0) {
+		var listItems = payload.seeds
+			.map(function (seed) {
+				return `<li>${escape_html(seed)}</li>`;
+			})
+			.join('');
+		if (ai_helper_results) {
+			ai_helper_results.innerHTML = `<strong>MusicBrainz found these Artists:</strong><ul class="mt-2 mb-0">${listItems}</ul>`;
+			ai_helper_results.classList.remove('d-none');
+		}
+		show_toast(
+			'MusicBrainz Search',
+			'Working from Artists found by MusicBrainz.'
+		);
+	} else if (ai_helper_results) {
+		ai_helper_results.textContent =
+			"MusicBrainz Discovery started. We'll surface artists as soon as possible.";
+		ai_helper_results.classList.remove('d-none');
+	}
+});
+
+socket.on('simple_search_error', function (payload) {
+	set_simple_search_loading(false);
+	var message =
+		payload && payload.message
+			? payload.message
+			: 'We could not complete the MusicBrainz search right now.';
+	if (ai_helper_error) {
+		ai_helper_error.textContent = message;
+		ai_helper_error.classList.remove('d-none');
+	}
+	hide_header_spinner();
+	show_toast('MusicBrainz Search', message);
+});
+
 socket.on('personal_sources_state', function (state) {
 	personalSourcesState = state || {};
 	updatePersonalButtons();
@@ -1514,3 +1551,44 @@ socket.on('prehear_result', function (data) {
 		show_toast('No sample found', message);
 	}
 });
+
+document.addEventListener('DOMContentLoaded', () => {
+    const mainSearchInput = document.getElementById('mb-main-search');
+    const mainSearchBtn = document.getElementById('mb-main-search-btn');
+
+    const triggerSimpleSearch = () => {
+		const query = mainSearchInput.value.trim();
+		if (!query) return;
+
+		set_simple_search_loading(true);
+
+		socket.emit("mb_artist_search", { query: query });
+	};
+
+    if (mainSearchBtn) {
+        mainSearchBtn.addEventListener('click', triggerSimpleSearch);
+    }
+
+    if (mainSearchInput) {
+        mainSearchInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                triggerSimpleSearch();
+            }
+        });
+    }
+});
+
+function set_simple_search_loading(isLoading) {
+    const searchBtn = document.getElementById('mb-main-search-btn');
+    const searchInput = document.getElementById('mb-main-search');
+
+    if (isLoading) {
+        searchBtn.disabled = true;
+        searchBtn.innerHTML = `<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span> Searching...`;
+        searchInput.disabled = true;
+    } else {
+        searchBtn.disabled = false;
+        searchBtn.innerHTML = `<i class="fa fa-magnifying-glass me-2"></i> Search`;
+        searchInput.disabled = false;
+    }
+}

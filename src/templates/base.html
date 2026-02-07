@@ -29,6 +29,37 @@
 {% endblock %}
 {% block topbar_actions %}{% endblock %}
 {% block main %}
+  <div id="search-welcome-section" class="container-fluid py-5">
+    <div class="row justify-content-center">
+      <div class="col-11 col-md-10 col-lg-8 text-center">
+        <div class="search-hero-content py-5">
+          <h2 class="display-5 mb-4">Find your favorite Artists</h2>
+          <p class="text-secondary mb-5">Search the MusicBrainz Database to find new Artists.</p>
+
+          <div class="input-group input-group-lg shadow-lg">
+            <input type="text"
+                   id="mb-main-search"
+                   class="form-control bg-dark text-light border-secondary p-4"
+                   placeholder="Enter artist name (e.g. Linkin Park, Tool, Hans Zimmer)..."
+                   aria-label="Search artists">
+            <button class="btn btn-primary px-4" type="button" id="mb-main-search-btn">
+              <i class="fa fa-magnifying-glass me-2"></i> Search
+            </button>
+          </div>
+
+          <div id="main-search-results" class="mt-4 text-start d-none">
+            <div class="card bg-dark border-secondary">
+              <div class="card-header border-secondary text-secondary small text-uppercase">
+                Search Results
+              </div>
+              <ul id="results-list" class="list-group list-group-flush">
+                </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
   {% if current_user.is_admin %}
   <!-- Settings Modal -->
   <div class="modal fade" id="config-modal" tabindex="-1" role="dialog" aria-labelledby="settings-modal"

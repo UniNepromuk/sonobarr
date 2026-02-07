@@ -179,3 +179,18 @@ def register_socketio_handlers(socketio: SocketIO, data_handler) -> None:
             return
         sid = request.sid
         socketio.start_background_task(data_handler.prehear, sid, raw_artist_name)
+
+    @socketio.on("mb_artist_search")
+    def handle_mb_search(payload):
+        if not current_user.is_authenticated:
+            disconnect()
+            return
+
+        query = payload.get("query", "") if isinstance(payload, dict) else str(payload)
+
+        if not query:
+            return
+
+        sid = request.sid
+
+        socketio.start_background_task(data_handler.simple_search, sid, query)
