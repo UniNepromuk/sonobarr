@@ -7,8 +7,8 @@
 [![License](https://img.shields.io/github/license/Dodelidoo-Labs/sonobarr)](./LICENSE)
 
 IMPORTANT
-This is a Fork for Implementing a Simple Search Bar into Sonobarr, it's not fully tested now and experimental.
-Once I've completely finished it, I'll send a pull request to the [Sonobarr Project](https://github.com/Dodelidoo-Labs/sonobarr) Project.
+This is a Fork for Implementing a simple Searchbar into Sonobarr, it's not fully tested now and experimental.
+Once I've completely finished it, I'll send a pull request to the [Sonobarr Project](https://github.com/Dodelidoo-Labs/sonobarr).
 
 Sonobarr marries your existing Lidarr library with Last.fm's discovery graph to surface artists you'll actually like. It runs as a Flask + Socket.IO application, ships with a polished Bootstrap UI, and includes admin tooling so folks can share a single instance safely.
 
