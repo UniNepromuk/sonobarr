@@ -30,7 +30,7 @@ from .integrations.listenbrainz_user import (
     ListenBrainzUserService,
 )
 
-from sonobarr_app.services.musicbrainz_search import search_artist
+from src.sonobarr_app.services.musicbrainz_search import search_artist
 
 LIDARR_MONITOR_TYPES = {
     "all",
@@ -132,6 +132,7 @@ class DataHandler:
         self.listenbrainz_user_service = ListenBrainzUserService()
 
         self.load_environ_or_config_settings()
+        self.cached_lidarr_mbids: set[str] = set()
 
     # App binding ----------------------------------------------------
     def set_flask_app(self, app) -> None:
@@ -442,12 +443,20 @@ class DataHandler:
             response = requests.get(endpoint, headers=headers, timeout=self.lidarr_api_timeout)
             if response.status_code == 200:
                 full_list = response.json()
-                names = [unidecode(artist["artistName"], replace_str=" ") for artist in full_list]
+                names = []
+                mbids = set()
+                for artist in full_list:
+                    name = unidecode(artist["artistName"], replace_str=" ")
+                    names.append(name)
+                    if "foreignArtistId" in artist:
+                        mbids.add(artist["foreignArtistId"])
+
                 names.sort(key=lambda value: value.lower())
 
                 with self.cache_lock:
                     self.cached_lidarr_names = names
                     self.cached_cleaned_lidarr_names = [name.lower() for name in names]
+                    self.cached_lidarr_mbids = mbids
 
                 session.lidarr_items = [{"name": name, "checked": checked} for name in names]
                 session.cleaned_lidarr_items = self._copy_cached_cleaned_names()
@@ -659,100 +668,47 @@ class DataHandler:
         if not success:
             return
 
-    def simple_search(self, sid: str, query: str) -> None:
+    def simple_search(self, sid: str, query: str, max_artists: int) -> None:
         session = self.ensure_session(sid)
-        if query == "" or query is None:
-            self.socketio.emit(
-                "simple_search_error",
-                {
-                    "message": "No Query provided.",
-                },
-                room=sid,
-            )
+        if not query:
+            self.socketio.emit("simple_search_error", {"message": "No Query provided."}, room=sid)
             return
 
         with self.cache_lock:
-            library_artists = list(self.cached_lidarr_names)
-            cleaned_library_names = set(self.cached_cleaned_lidarr_names)
+            existing_mbids = set(self.cached_lidarr_mbids)
 
-        start_time = time.perf_counter()
-        self.logger.info("Search for %s", query)
-        artists = search_artist(query)
-        elapsed = time.perf_counter() - start_time
-        self.logger.info("Search query succeeded in %.2fs with %d seed artists", elapsed, len(artists))
+        artists = search_artist(query, max_artists)
 
         if not artists:
-            self.logger.info("Search completed in %.2fs but returned no artists", elapsed)
-            self.socketio.emit(
-                "simple_search_error",
-                {
-                    "message": "MusicBrainz couldn't suggest any artists from that request. Try adding genre or artist hints.",
-                },
-                room=sid,
-            )
+            self.socketio.emit("simple_search_error", {"message": "No artists found."}, room=sid)
             return
 
-        filtered_seeds: List[str] = []
-        skipped_existing: List[str] = []
-        for artist in artists:
-            name = artist.get_name()
-            normalized_seed = unidecode(name).lower()
-            if normalized_seed in cleaned_library_names:
-                skipped_existing.append(name)
-                continue
-            filtered_seeds.append(name)
+        seeds_with_ids = []
+        skipped_existing = []
 
-        if not filtered_seeds:
-            elapsed = time.perf_counter() - start_time
-            self.logger.info(
-                "MusicBrainz Search completed in %.2fs but every seed matched an existing Lidarr artist", elapsed
-            )
-            self.socketio.emit(
-                "simple_search_error",
-                {
-                    "message": "All suggested artists are already in your Lidarr library. Try a different Query.",
-                },
-                room=sid,
-            )
+        for artist in artists:
+            a_name = artist.get_name()
+            a_id = artist.get_id()
+
+            if a_id in existing_mbids:
+                skipped_existing.append(a_name)
+                continue
+
+            seeds_with_ids.append({"name": a_name, "mbid": a_id})
+
+        if not seeds_with_ids:
+            self.socketio.emit("simple_search_error", {"message": "All results already in Lidarr."}, room=sid)
             return
 
         if skipped_existing:
-            self.logger.info(
-                "Filtered %d searched Artists already present in Lidarr: %s",
-                len(skipped_existing),
-                ", ".join(skipped_existing),
-            )
-            toast_message = (
-                f"{len(skipped_existing)} MusicBrainz suggestion(s) are already in your Lidarr library."
-                if len(skipped_existing) > 1
-                else f"{skipped_existing[0]} is already in your Lidarr library."
-            )
-            self.socketio.emit(
-                "new_toast_msg",
-                {
-                    "title": "Skipping known artists",
-                    "message": toast_message,
-                },
-                room=sid,
-            )
-
-        seeds = filtered_seeds
+            self.socketio.emit("new_toast_msg", {
+                "title": "Skipping known artists",
+                "message": f"{len(skipped_existing)} artists already in library."
+            }, room=sid)
 
         session.prepare_for_search()
-        success = self._stream_seed_artists(
-            session,
-            sid,
-            seeds,
-            ack_event="simple_search_ack",
-            ack_payload={"seeds": seeds},
-            error_event="simple_search_error",
-            error_message="We couldn't load those artists from our data sources. Try refining your request.",
-            missing_title="Missing artist data",
-            missing_message="Some MusicBrainz picks couldn't be fully loaded.",
-            source_log_label="MusicBrainz",
-        )
-        if not success:
-            return
+
+        self._stream_seed_artists_with_ids(session, sid, seeds_with_ids)
 
     def _fetch_lastfm_personal_artists(self, username: str) -> List[str]:
         if not self.last_fm_user_service:
@@ -1127,136 +1083,144 @@ class DataHandler:
     def add_artists(self, sid: str, raw_artist_name: str) -> str:
         session = self.ensure_session(sid)
         artist_name = urllib.parse.unquote(raw_artist_name)
-        artist_folder = artist_name.replace("/", " ")
-        status = "Failed to Add"
 
-        try:
-            musicbrainzngs.set_useragent(self.app_name, self.app_rev, self.app_url)
+        mbid = next((a.get("MBID") for a in session.recommended_artists if a["Name"] == artist_name), None)
+
+        if not mbid:
             mbid = self.get_mbid_from_musicbrainz(artist_name)
 
-            if mbid:
-                lidarr_url = f"{self.lidarr_address}/api/v1/artist"
-                headers = {"X-Api-Key": self.lidarr_api_key}
-                monitored_flag = bool(self.lidarr_monitored)
-                add_options: dict[str, Any] = {
-                    "searchForMissingAlbums": bool(self.search_for_missing_albums),
-                    "monitored": monitored_flag,
-                }
-                if self.lidarr_monitor_option:
-                    add_options["monitor"] = self.lidarr_monitor_option
-                if self.lidarr_albums_to_monitor:
-                    add_options["albumsToMonitor"] = list(self.lidarr_albums_to_monitor)
-                payload = {
-                    "ArtistName": artist_name,
-                    "qualityProfileId": self.quality_profile_id,
-                    "metadataProfileId": self.metadata_profile_id,
-                    "path": os.path.join(self.root_folder_path, artist_folder, ""),
-                    "rootFolderPath": self.root_folder_path,
-                    "foreignArtistId": mbid,
-                    "monitored": monitored_flag,
-                    "addOptions": add_options,
-                }
-                if self.lidarr_monitor_new_items:
-                    payload["monitorNewItems"] = self.lidarr_monitor_new_items
+        if mbid:
+            artist_folder = artist_name.replace("/", " ")
+            status = "Failed to Add"
 
-                if self.dry_run_adding_to_lidarr:
-                    response = None
-                    response_status = 201
-                else:
-                    response = requests.post(
-                        lidarr_url,
-                        headers=headers,
-                        json=payload,
-                        timeout=self.lidarr_api_timeout,
-                    )
-                    response_status = response.status_code
+            try:
+                musicbrainzngs.set_useragent(self.app_name, self.app_rev, self.app_url)
 
-                if response_status == 201:
-                    self.logger.info("Artist '%s' added successfully to Lidarr.", artist_name)
-                    status = "Added"
-                    session.lidarr_items.append({"name": artist_name, "checked": False})
-                    session.cleaned_lidarr_items.append(unidecode(artist_name).lower())
-                    with self.cache_lock:
-                        if artist_name not in self.cached_lidarr_names:
-                            self.cached_lidarr_names.append(artist_name)
-                            self.cached_cleaned_lidarr_names.append(unidecode(artist_name).lower())
-                else:
+                if mbid:
+                    lidarr_url = f"{self.lidarr_address}/api/v1/artist"
+                    headers = {"X-Api-Key": self.lidarr_api_key}
+                    monitored_flag = bool(self.lidarr_monitored)
+                    add_options: dict[str, Any] = {
+                        "searchForMissingAlbums": bool(self.search_for_missing_albums),
+                        "monitored": monitored_flag,
+                    }
+                    if self.lidarr_monitor_option:
+                        add_options["monitor"] = self.lidarr_monitor_option
+                    if self.lidarr_albums_to_monitor:
+                        add_options["albumsToMonitor"] = list(self.lidarr_albums_to_monitor)
+                    payload = {
+                        "ArtistName": artist_name,
+                        "qualityProfileId": self.quality_profile_id,
+                        "metadataProfileId": self.metadata_profile_id,
+                        "path": os.path.join(self.root_folder_path, artist_folder, ""),
+                        "rootFolderPath": self.root_folder_path,
+                        "foreignArtistId": mbid,
+                        "monitored": monitored_flag,
+                        "addOptions": add_options,
+                    }
+                    if self.lidarr_monitor_new_items:
+                        payload["monitorNewItems"] = self.lidarr_monitor_new_items
+
                     if self.dry_run_adding_to_lidarr:
-                        response_body = "Dry-run mode: no request sent."
-                        error_payload = None
-                    elif response is not None:
-                        response_body = response.text.strip()
-                        try:
-                            error_payload = response.json()
-                        except ValueError:
+                        response = None
+                        response_status = 201
+                    else:
+                        response = requests.post(
+                            lidarr_url,
+                            headers=headers,
+                            json=payload,
+                            timeout=self.lidarr_api_timeout,
+                        )
+                        response_status = response.status_code
+
+                    if response_status == 201:
+                        self.logger.info("Artist '%s' added successfully to Lidarr.", artist_name)
+                        status = "Added"
+                        session.lidarr_items.append({"name": artist_name, "checked": False})
+                        session.cleaned_lidarr_items.append(unidecode(artist_name).lower())
+                        with self.cache_lock:
+                            if artist_name not in self.cached_lidarr_names:
+                                self.cached_lidarr_names.append(artist_name)
+                                self.cached_cleaned_lidarr_names.append(unidecode(artist_name).lower())
+                            self.cached_lidarr_mbids.add(mbid)
+                    else:
+                        if self.dry_run_adding_to_lidarr:
+                            response_body = "Dry-run mode: no request sent."
                             error_payload = None
-                    else:
-                        response_body = "No response object returned."
-                        error_payload = None
+                        elif response is not None:
+                            response_body = response.text.strip()
+                            try:
+                                error_payload = response.json()
+                            except ValueError:
+                                error_payload = None
+                        else:
+                            response_body = "No response object returned."
+                            error_payload = None
 
-                    self.logger.error(
-                        "Failed to add artist '%s' to Lidarr (status=%s). Body: %s",
-                        artist_name,
-                        response_status,
-                        response_body,
+                        self.logger.error(
+                            "Failed to add artist '%s' to Lidarr (status=%s). Body: %s",
+                            artist_name,
+                            response_status,
+                            response_body,
+                        )
+                        if error_payload is not None:
+                            self.logger.error("Lidarr error payload: %s", error_payload)
+
+                        if isinstance(error_payload, list) and error_payload:
+                            error_message = error_payload[0].get("errorMessage", "No Error Message Returned")
+                        elif isinstance(error_payload, dict):
+                            error_message = (
+                                    error_payload.get("errorMessage")
+                                    or error_payload.get("message")
+                                    or "No Error Message Returned"
+                            )
+                        else:
+                            error_message = response_body or "Error Unknown"
+
+                        self.logger.error("Lidarr error message: %s", error_message)
+
+                        if "already been added" in error_message or "configured for an existing artist" in error_message:
+                            status = "Already in Lidarr"
+                        elif "Invalid Path" in error_message:
+                            status = "Invalid Path"
+                            self.logger.info(
+                                "Path '%s' reported invalid by Lidarr.",
+                                os.path.join(self.root_folder_path, artist_folder, ""),
+                            )
+                        else:
+                            status = "Failed to Add"
+                else:
+                    self.logger.warning(
+                        "No MusicBrainz match found for '%s'; cannot add to Lidarr.", artist_name
                     )
-                    if error_payload is not None:
-                        self.logger.error("Lidarr error payload: %s", error_payload)
+                    self.socketio.emit(
+                        "new_toast_msg",
+                        {
+                            "title": "Failed to add Artist",
+                            "message": f"No Matching Artist for: '{artist_name}' in MusicBrainz.",
+                        },
+                        room=sid,
+                    )
 
-                    if isinstance(error_payload, list) and error_payload:
-                        error_message = error_payload[0].get("errorMessage", "No Error Message Returned")
-                    elif isinstance(error_payload, dict):
-                        error_message = (
-                            error_payload.get("errorMessage")
-                            or error_payload.get("message")
-                            or "No Error Message Returned"
-                        )
-                    else:
-                        error_message = response_body or "Error Unknown"
-
-                    self.logger.error("Lidarr error message: %s", error_message)
-
-                    if "already been added" in error_message or "configured for an existing artist" in error_message:
-                        status = "Already in Lidarr"
-                    elif "Invalid Path" in error_message:
-                        status = "Invalid Path"
-                        self.logger.info(
-                            "Path '%s' reported invalid by Lidarr.",
-                            os.path.join(self.root_folder_path, artist_folder, ""),
-                        )
-                    else:
-                        status = "Failed to Add"
-            else:
-                self.logger.warning(
-                    "No MusicBrainz match found for '%s'; cannot add to Lidarr.", artist_name
-                )
+            except Exception as exc:  # pragma: no cover - network errors
+                self.logger.exception("Unexpected error while adding '%s' to Lidarr", artist_name)
                 self.socketio.emit(
                     "new_toast_msg",
                     {
                         "title": "Failed to add Artist",
-                        "message": f"No Matching Artist for: '{artist_name}' in MusicBrainz.",
+                        "message": f"Error adding '{artist_name}': {exc}",
                     },
                     room=sid,
                 )
+            finally:
+                for item in session.recommended_artists:
+                    if item["Name"] == artist_name:
+                        item["Status"] = status
+                        self.socketio.emit("refresh_artist", item, room=sid)
+                        break
 
-        except Exception as exc:  # pragma: no cover - network errors
-            self.logger.exception("Unexpected error while adding '%s' to Lidarr", artist_name)
-            self.socketio.emit(
-                "new_toast_msg",
-                {
-                    "title": "Failed to add Artist",
-                    "message": f"Error adding '{artist_name}': {exc}",
-                },
-                room=sid,
-            )
-        finally:
-            for item in session.recommended_artists:
-                if item["Name"] == artist_name:
-                    item["Status"] = status
-                    self.socketio.emit("refresh_artist", item, room=sid)
-                    break
-
-        return status
+            return status
+        return "Failed to Add"
 
     def request_artist(self, sid: str, raw_artist_name: str) -> None:
         session = self.ensure_session(sid)
@@ -1731,6 +1695,22 @@ class DataHandler:
         session.running = False
         self.socketio.emit("initial_load_complete", {"hasMore": has_more}, room=sid)
         return True
+
+    def _stream_seed_artists_with_ids(self, session, sid, seeds_with_ids):
+        self.socketio.emit("simple_search_ack", {"seeds": [s["name"] for s in seeds_with_ids]}, room=sid)
+        self.socketio.emit("clear", room=sid)
+
+        lfm_network = pylast.LastFMNetwork(api_key=self.last_fm_api_key, api_secret=self.last_fm_api_secret)
+
+        for item in seeds_with_ids:
+            name = item["name"]
+            mbid = item["mbid"]
+
+            payload = self._fetch_artist_payload(lfm_network, name)
+            if payload:
+                payload["MBID"] = mbid
+                session.recommended_artists.append(payload)
+                self.socketio.emit("more_artists_loaded", [payload], room=sid)
 
     def _normalize_openai_headers_field(self, value: Any) -> str:
         if isinstance(value, dict):

@@ -187,10 +187,11 @@ def register_socketio_handlers(socketio: SocketIO, data_handler) -> None:
             return
 
         query = payload.get("query", "") if isinstance(payload, dict) else str(payload)
+        max_artists = payload.get("max_artists", "") if isinstance(payload, dict) else int(payload)
 
         if not query:
             return
 
         sid = request.sid
 
-        socketio.start_background_task(data_handler.simple_search, sid, query)
+        socketio.start_background_task(data_handler.simple_search, sid, query, max_artists)

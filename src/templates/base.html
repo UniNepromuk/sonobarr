@@ -36,16 +36,38 @@
           <h2 class="display-5 mb-4">Find your favorite Artists</h2>
           <p class="text-secondary mb-5">Search the MusicBrainz Database to find new Artists.</p>
 
-          <div class="input-group input-group-lg shadow-lg">
-            <input type="text"
-                   id="mb-main-search"
-                   class="form-control bg-dark text-light border-secondary p-4"
-                   placeholder="Enter artist name (e.g. Linkin Park, Tool, Hans Zimmer)..."
-                   aria-label="Search artists">
-            <button class="btn btn-primary px-4" type="button" id="mb-main-search-btn">
-              <i class="fa fa-magnifying-glass me-2"></i> Search
-            </button>
-          </div>
+            <div class="input-group input-group-lg shadow-lg">
+              <input type="text"
+                     id="mb-main-search"
+                     class="form-control bg-dark text-light border-secondary p-4"
+                     placeholder="Enter Name (e.g. Linkin Park)"
+                     aria-label="Search artists">
+
+              <button class="btn btn-outline-secondary border-secondary bg-dark text-light"
+                      type="button"
+                      onclick="changeValue(-1)">
+                <i class="fa fa-minus"></i>
+              </button>
+
+              <input type="text"
+                     id="mb-max-artists"
+                     class="form-control bg-dark text-light border-secondary p-4 text-center"
+                     value="5"
+                     inputmode="numeric"
+                     pattern="[0-9]*"
+                     style="max-width: 80px; border-left: none; border-right: none;"
+                     title="Max artists count">
+
+              <button class="btn btn-outline-secondary border-secondary bg-dark text-light"
+                      type="button"
+                      onclick="changeValue(1)">
+                <i class="fa fa-plus"></i>
+              </button>
+
+              <button class="btn btn-primary px-4" type="button" id="mb-main-search-btn">
+                <i class="fa fa-magnifying-glass me-2"></i> Search
+              </button>
+            </div>
 
           <div id="main-search-results" class="mt-4 text-start d-none">
             <div class="card bg-dark border-secondary">

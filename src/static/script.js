@@ -1375,6 +1375,7 @@ socket.on('simple_search_ack', function (payload) {
 			"MusicBrainz Discovery started. We'll surface artists as soon as possible.";
 		ai_helper_results.classList.remove('d-none');
 	}
+    load_more_button.hidden = true;
 });
 
 socket.on('simple_search_error', function (payload) {
@@ -1555,15 +1556,21 @@ socket.on('prehear_result', function (data) {
 document.addEventListener('DOMContentLoaded', () => {
     const mainSearchInput = document.getElementById('mb-main-search');
     const mainSearchBtn = document.getElementById('mb-main-search-btn');
+    const maxArtistsInput = document.getElementById('mb-max-artists');
 
     const triggerSimpleSearch = () => {
-		const query = mainSearchInput.value.trim();
-		if (!query) return;
+       const query = mainSearchInput.value.trim();
+       const currentMax = maxArtistsInput ? maxArtistsInput.value : 5;
 
-		set_simple_search_loading(true);
+       if (!query) return;
 
-		socket.emit("mb_artist_search", { query: query });
-	};
+       set_simple_search_loading(true);
+
+       socket.emit("mb_artist_search", {
+           query: query,
+           max_artists: parseInt(currentMax)
+       });
+    };
 
     if (mainSearchBtn) {
         mainSearchBtn.addEventListener('click', triggerSimpleSearch);
@@ -1592,3 +1599,21 @@ function set_simple_search_loading(isLoading) {
         searchInput.disabled = false;
     }
 }
+
+function changeValue(delta) {
+    const input = document.getElementById('mb-max-artists');
+    let currentValue = parseInt(input.value) || 0;
+    let newValue = currentValue + delta;
+
+    if (newValue < 1) newValue = 1;
+    if (newValue > 50) newValue = 50;
+
+    input.value = newValue;
+}
+
+document.getElementById('mb-max-artists').addEventListener('change', function() {
+    let val = parseInt(this.value);
+    if (isNaN(val) || val < 1) this.value = 1;
+    else if (val > 50) this.value = 50;
+    else this.value = val;
+});
